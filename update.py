@@ -10,7 +10,7 @@ from datetime import datetime
 if os.name == "nt":
     from win32_setctime import setctime
 
-files_to_consider = ["bmp", "gif", "jpg", "jpeg", "png", "mp4", "webp"]
+files_to_consider = ["bmp", "gif", "jpg", "jpeg", "png", "mp4", "webp", "mov"]
 
 exif_metadata_keys_to_consider = ["Exif.Photo.DateTimeDigitized", "Exif.Photo.DateTimeOriginal"]
 exif_metadata_datetime_format = "%Y:%m:%d %H:%M:%S"
@@ -21,6 +21,12 @@ fallback_image_date = datetime(2010, 1, 1)
 # Any image paths that fail to find the date will be stored here
 image_misses = []
 log_enabled = True
+
+# Output files will be batched into folder sets no bigger than this value
+max_output_dir_file_limit = 4000
+
+# Once the tool is finished it will output result metadata to this file
+output_info_file = "info.json"
 
 
 def enable_log():
@@ -94,7 +100,15 @@ def try_get_date_information_from_path(img_path):
                 # Ignore conversion failures
                 pass
 
-    return int(working_datetime.timestamp())
+    result = base_datetime.timestamp()
+
+    try:
+        result = int(working_datetime.timestamp())
+    except:
+        # Return the base datetime if we fail to pull the timestamp from the file
+        pass
+
+    return result
 
 
 def get_image_date_timestamp_for_image_path(img_path):
@@ -134,6 +148,13 @@ def get_image_date_timestamp_for_image_path(img_path):
     else:
         log(f"Could not determine image date from image path: {img_path}")
 
+    # Next, try to see if the modified date on image asset is less than its created date, likely accurate
+    ctime = os.path.getctime(img_path)
+    mtime = os.path.getmtime(img_path)
+
+    if mtime < ctime:
+        return int(mtime)
+
     # Finally, just set it to the start of 2024 if we can't get anything useful
     image_misses.append(img_path)
     return 0
@@ -148,10 +169,21 @@ def setup_dest_dir(dest_dir):
         log("WARNING: Dest dir has existing files")
 
 
+def setup_dest_dir_working_subdir(dest_dir, subdir):
+    dest_dir_subpath = f"{dest_dir}/{subdir}"
+    if not os.path.isdir(dest_dir_subpath):
+        os.mkdir(dest_dir_subpath)
+
+
 def process_dir(source_dir, dest_dir):
     log(f"Processing source directory: {source_dir} saving into {dest_dir}")
 
     setup_dest_dir(dest_dir)
+
+    num_files_processed = 0
+    subdir_num = 0
+
+    setup_dest_dir_working_subdir(dest_dir, subdir_num)
 
     for root, dir, files in os.walk(source_dir):
         for ex in files_to_consider:
@@ -165,7 +197,7 @@ def process_dir(source_dir, dest_dir):
                 new_asset_path = None
                 itr = 0
                 while new_asset_path is None:
-                    new_asset_path = f"{dest_dir}/{asset_filename}.{timestamp}.{itr}{os.path.splitext(asset_path)[1]}"
+                    new_asset_path = f"{dest_dir}/{subdir_num}/{asset_filename}.{timestamp}.{itr}{os.path.splitext(asset_path)[1]}"
                     if os.path.exists(new_asset_path):
                         itr += 1
                         new_asset_path = None
@@ -177,8 +209,15 @@ def process_dir(source_dir, dest_dir):
                 if os.name == "nt":
                     setctime(new_asset_path, timestamp)
 
+                num_files_processed += 1
+                if num_files_processed % max_output_dir_file_limit == 0:
+                    subdir_num += 1
+                    setup_dest_dir_working_subdir(dest_dir, subdir_num)
+
     for img_path in image_misses:
         log(f"Failed to parse date for image: {img_path}")
+
+    return num_files_processed
 
 
 def main(args):
@@ -190,7 +229,18 @@ def main(args):
         print("Source dir and dest dir cannot be the same directory")
         exit()
 
-    process_dir(args[1], args[2])
+    input_dir = args[1]
+    output_dir = args[2]
+
+    num_files = process_dir(input_dir, output_dir)
+
+    tool_info = json.dumps({
+        "total_files": num_files,
+        "misses": image_misses
+    })
+
+    with open(f"{output_dir}/{output_info_file}", "w+") as f:
+        f.write(tool_info)
 
 
 if __name__ == "__main__":
