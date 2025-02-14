@@ -160,7 +160,6 @@ def get_image_date_timestamp_for_image_path(img_path):
         pass
 
     if len(exif_metadata) > 0:
-        log(exif_metadata)
         for k in exif_metadata_keys_to_consider:
             if k in exif_metadata:
                 datetime_object = datetime.strptime(exif_metadata[k], exif_metadata_datetime_format)
@@ -189,7 +188,7 @@ def get_image_date_timestamp_for_image_path(img_path):
     else:
         log(f"Could not determine image date from image path: {img_path}")
 
-    # Next, try to see if the modified date on image asset is less than its created date, likely accurate
+    # Lastly, try to see if the modified date on image asset is less than its created date, likely accurate
     ctime = os.path.getctime(img_path)
     mtime = os.path.getmtime(img_path)
 
@@ -198,7 +197,7 @@ def get_image_date_timestamp_for_image_path(img_path):
 
     image_misses.append(img_path)
 
-    return 0
+    return None
 
 
 def setup_dest_dir(dest_dir):
@@ -232,7 +231,10 @@ def process_dir(source_dir, dest_dir):
                 asset_path = f"{root}/{file_name}"
                 asset_filename = os.path.basename(asset_path).split(".")[0].replace(" ", "-")
                 timestamp = get_image_date_timestamp_for_image_path(asset_path)
-                if timestamp == 0:
+                # Failure case where we can't sus out the date for the photo
+                # so we apply a fallback date that puts the picture in the past
+                # at a specific location so it can be searched if needed
+                if timestamp is None:
                     log(f"Using fallback date {fallback_image_date} start for {asset_path}")
                     timestamp = fallback_image_date.timestamp()
                 new_asset_path = None
