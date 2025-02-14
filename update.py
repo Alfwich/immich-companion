@@ -5,6 +5,7 @@ import shutil
 import fnmatch
 import json
 import re
+import ffmpeg
 from datetime import datetime
 
 if os.name == "nt":
@@ -23,7 +24,7 @@ image_misses = []
 log_enabled = True
 
 # Output files will be batched into folder sets no bigger than this value
-max_output_dir_file_limit = 4000
+max_output_dir_file_limit = 10000
 
 # Once the tool is finished it will output result metadata to this file
 output_info_file = "info.json"
@@ -51,6 +52,12 @@ def try_get_google_metadata(img_path):
         with open(metadata_path, "r") as json_raw:
             return json.load(json_raw)
 
+    # Alt metadata file name, likely a Google formatting bug?
+    metadata_path2 = f"{img_path}.supplemental-m.json"
+    if os.path.exists(metadata_path2):
+        with open(metadata_path2, "r") as json_raw:
+            return json.load(json_raw)
+
     return {}
 
 
@@ -60,11 +67,15 @@ google_photos_year_hint = "Photos from "
 date_format_expressions = [
     {  # Simple format that is just 8 numbers in a row, likely a date
         "r": "([0-9]{8})",
-        "f": "%Y%m%d"
+        "f": "%Y%m%d",
+    },
+    {  # Simple format that is just 8 numbers in a row, likely a date
+        "r": "([0-9]{8})",
+        "f": "%d%m%Y",
     },
     {
         "r": "([0-9]{4}-[0-9]{2}-[0-9]{2})",
-        "f": "%Y-%m-%d"
+        "f": "%Y-%m-%d",
     },
 ]
 
@@ -111,13 +122,29 @@ def try_get_date_information_from_path(img_path):
     return result
 
 
+def get_dict_field(d, fields, t, de):
+    current = d
+    for f in fields:
+        if f in current:
+            current = current[f]
+        else:
+            return de
+
+    return t(current)
+
+
 def get_image_date_timestamp_for_image_path(img_path):
     global image_misses
 
     # First try to get the Google metadata for the image, if available
     google_metadata = try_get_google_metadata(img_path)
     if len(google_metadata) > 0:
-        timestamp = int(google_metadata["creationTime"]["timestamp"])
+
+        timestamp = get_dict_field(google_metadata, ["photoTakenTime", "timestamp"], int, 0)
+        if timestamp > 0:
+            return timestamp
+
+        timestamp = get_dict_field(google_metadata, ["creationTime", "timestamp"], int, 0)
         if timestamp > 0:
             return timestamp
 
@@ -133,12 +160,26 @@ def get_image_date_timestamp_for_image_path(img_path):
         pass
 
     if len(exif_metadata) > 0:
+        log(exif_metadata)
         for k in exif_metadata_keys_to_consider:
             if k in exif_metadata:
                 datetime_object = datetime.strptime(exif_metadata[k], exif_metadata_datetime_format)
                 return int(datetime_object.timestamp())
     else:
         log(f"No exif metadata available for: {img_path}")
+
+    # Next, try ffmpeg to see if it can probe the metadata
+    ffmpeg_probe_data = ffmpeg.probe(img_path)
+    if len(ffmpeg_probe_data) > 0:
+        create_date = get_dict_field(ffmpeg_probe_data, ["format", "tags", "creation_time"], datetime.fromisoformat, None)
+        if not create_date is None:
+            return int(create_date.timestamp())
+
+        create_date = get_dict_field(ffmpeg_probe_data, ["format", "tags", "com.apple.quicktime.creationdate"], datetime.fromisoformat, None)
+        if not create_date is None:
+            return int(create_date.timestamp())
+    else:
+        log(f"No ffmpeg metadata available for: {img_path}")
 
     # Next, try to get some date information about the image from the filepath, if possible
     image_path_create_date = try_get_date_information_from_path(img_path)
@@ -155,8 +196,8 @@ def get_image_date_timestamp_for_image_path(img_path):
     if mtime < ctime:
         return int(mtime)
 
-    # Finally, just set it to the start of 2024 if we can't get anything useful
     image_misses.append(img_path)
+
     return 0
 
 

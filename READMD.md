@@ -6,6 +6,7 @@ Walks a Google image/video dump updating the modified date for images based on a
 Required PIP packages:
 - win32-setctime
 - pyexiv2
+- ffmpeg-python
 
 Usage:
 `python3.exe update.py <source_dir> <dest_dir>`
