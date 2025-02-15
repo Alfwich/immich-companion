@@ -7,6 +7,7 @@ Required PIP packages:
 - win32-setctime
 - pyexiv2
 - ffmpeg-python
+- boto3 (is using S3 cloud backups)
 
 Usage:
 `python3.exe update.py <source_dir> <dest_dir>`
