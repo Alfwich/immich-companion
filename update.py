@@ -265,11 +265,12 @@ def process_dir(source_dir, dest_dir):
 
 def main(args):
     if len(args) < 3:
-        print("Expected usage: python3.exe update.py <source_dir> <dest_dir>")
+        log("Expected usage: python3.exe update.py <source_dir> <dest_dir>")
         exit()
 
     if args[1] == args[2]:
-        print("Source dir and dest dir cannot be the same directory")
+        # TODO(aw): This should be a subdirectory check where we cannot have the dest_dir be a subdir of source_dir
+        log("Source dir and dest dir cannot be the same directory")
         exit()
 
     input_dir = args[1]
