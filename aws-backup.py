@@ -5,7 +5,6 @@ import tempfile
 import fnmatch
 import zipfile
 import botocore
-import time
 import json
 import hashlib
 from pathlib import Path
@@ -14,6 +13,8 @@ from datetime import datetime
 import datetime as dt
 
 import botocore.exceptions
+
+debug_mode = True
 
 archive_version = 0.1
 
@@ -122,9 +123,6 @@ def load_archive_info_from_bucket(bucket_name):
 def save_archive_info_to_bucket(bucket_name, archive_info):
 
     num_objects_tracked = len(archive_info["_object_asset_map"])
-    if num_objects_tracked == archive_info["num_objects_tracked"]:
-        log("No new objects to add to the archive")
-        return
 
     # Roughly how many objects we are tracking at this moment in time
     archive_info["num_objects_tracked"] = num_objects_tracked
@@ -135,8 +133,15 @@ def save_archive_info_to_bucket(bucket_name, archive_info):
         if k.startswith("_"):
             del archive_info[k]
 
-    s3_client = boto3.client("s3")
-    s3_client.put_object(Bucket=bucket_name, Key="archive.json", Body=json.dumps(archive_info))
+    if debug_mode or num_objects_tracked == archive_info["num_objects_tracked"]:
+        log("No new objects to add to the archive")
+    else:
+        s3_client = boto3.client("s3")
+        s3_client.put_object(Bucket=bucket_name, Key="archive.json", Body=json.dumps(archive_info))
+
+    if debug_mode:
+        with open("archive.debug.json", "w+") as f:
+            json.dump(archive_info, f, indent=4)
 
 
 def add_asset_to_archive_info(archive_info, asset_path, object_key):
@@ -242,7 +247,8 @@ def main(aws_bucket_name, source_dir):
                 archive_zip = zipfile.ZipFile(f"{tmpdirname}/archive.zip", "w")
                 for asset_hash, asset in archive["assets"].items():
                     asset_path = archive_info["_object_asset_map"][asset_hash]
-                    archive_zip.write(asset_path, asset["object_key"])
+                    if not debug_mode:
+                        archive_zip.write(asset_path, asset["object_key"])
                 archive_zip.close()
 
                 # TODO(aw): This should be a deep freeze
