@@ -168,17 +168,21 @@ def get_image_date_timestamp_for_image_path(img_path):
         log(f"No exif metadata available for: {img_path}")
 
     # Next, try ffmpeg to see if it can probe the metadata
-    ffmpeg_probe_data = ffmpeg.probe(img_path)
-    if len(ffmpeg_probe_data) > 0:
-        create_date = get_dict_field(ffmpeg_probe_data, ["format", "tags", "creation_time"], datetime.fromisoformat, None)
-        if not create_date is None:
-            return int(create_date.timestamp())
+    try:
+        ffmpeg_probe_data = ffmpeg.probe(img_path)
+        if len(ffmpeg_probe_data) > 0:
+            create_date = get_dict_field(ffmpeg_probe_data, ["format", "tags", "creation_time"], datetime.fromisoformat, None)
+            if not create_date is None:
+                return int(create_date.timestamp())
 
-        create_date = get_dict_field(ffmpeg_probe_data, ["format", "tags", "com.apple.quicktime.creationdate"], datetime.fromisoformat, None)
-        if not create_date is None:
-            return int(create_date.timestamp())
-    else:
-        log(f"No ffmpeg metadata available for: {img_path}")
+            create_date = get_dict_field(ffmpeg_probe_data, ["format", "tags", "com.apple.quicktime.creationdate"], datetime.fromisoformat, None)
+            if not create_date is None:
+                return int(create_date.timestamp())
+        else:
+            log(f"No ffmpeg metadata available for: {img_path}")
+    except:
+        # Failures mean no ffmpeg data is available
+        pass
 
     # Next, try to get some date information about the image from the filepath, if possible
     image_path_create_date = try_get_date_information_from_path(img_path)
