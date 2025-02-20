@@ -1,2 +1,3 @@
 test_out
-archive.debug.json
+archive.json
+backup-log.*.txt
