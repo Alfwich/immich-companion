@@ -40,6 +40,9 @@ immich_working_dirs = ["backups", "upload"]
 agent_state_file_name = "agent-state.json"
 archive_state_file_name = "archive.json"
 
+log_file_name = "backup-log.txt"
+log_file = open(f"{os.path.dirname(os.path.realpath(__file__))}/{log_file_name}", "w+")
+
 
 def enable_log():
     global log_enabled
@@ -55,6 +58,8 @@ def log(msg):
     global log_enabled
     if log_enabled:
         print(msg)
+        if not log_file.closed:
+            log_file.write(f"{msg}\n")
 
 
 def list_bucket(bucket_name):
@@ -250,8 +255,8 @@ def main(aws_bucket_name, source_dir):
 
     archive_info = load_archive_info_from_bucket(aws_bucket_name)
 
-    # If the agent state was processing then we need to validate that all archives have been written
-    if load_agent_state_from_bucket(aws_bucket_name) == AGENT_STATE_PROCESSING:
+    # If the agent was never completed we should ensure archive consistency, as possible
+    if load_agent_state_from_bucket(aws_bucket_name) != AGENT_STATE_COMPLETE:
         log(f"Agent state was processing, checking archives for consistency...")
         for archive in archive_info["archives"]:
             archive_key = f"archive/archive-{archive['archive_id']}.zip"
@@ -262,7 +267,7 @@ def main(aws_bucket_name, source_dir):
 
             # The archive was supposed to be uploaded, but it does not exist
             if archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN and not archive_exists:
-                log(f"      Archive does not exist on remote storage, marking as unlocked")
+                log(f"      Archive does not exist on remote storage, marking as pending upload")
                 archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE
 
             # The archive was supposed to be uploaded and it does exist
@@ -276,9 +281,7 @@ def main(aws_bucket_name, source_dir):
                     if archive["archive_id"] in archive_info["assets"][asset]["archives"]:
                         archive_info["assets"][asset]["archives"][archive["archive_id"]]["status"] = ASSET_STATUS_STORED
 
-    log(f"Working in source_dir: {source_dir}")
-
-    # Walk the source directory and add all assets to the archive_info
+    log(f"Walking the source directory: {source_dir}, and updating asset catalogue")
     for folder in immich_working_dirs:
         for root, dir, files in os.walk(f"{source_dir}/{folder}"):
             for file_name in fnmatch.filter(files, "*"):
@@ -292,6 +295,7 @@ def main(aws_bucket_name, source_dir):
     save_agent_state_to_bucket(aws_bucket_name, AGENT_STATE_PROCESSING)
 
     # Upload assets that are fresh and are contained in an unlocked archive
+    log("Checking staged assets for upload")
     for asset in archive_info["assets"]:
         should_upload = False
         asset_data = archive_info["assets"][asset]
@@ -301,6 +305,10 @@ def main(aws_bucket_name, source_dir):
             if data["status"] == ASSET_STATUS_FRESH and archive["status"] == ARCHIVE_ASSET_STATUS_UNLOCKED:
                 should_upload = True
                 data["status"] = ASSET_STATUS_STORED
+
+            # If the archive is unlocked and the object does not exist on cloud storage, upload it again
+            elif archive["status"] == ARCHIVE_ASSET_STATUS_UNLOCKED and f"stage/{asset}" not in bucket_object_keys:
+                should_upload = True
 
         # Directly upload fresh assets as they are either new or updated
         if should_upload and asset in disk_objects:
@@ -323,10 +331,11 @@ def main(aws_bucket_name, source_dir):
                 archive["size"] -= archive_info["assets"][key]["archives"][archive_id]["size"]
             del archive_info["assets"][key]
 
+    log("Checking archives to see if we need to upload any ...")
     for archive in archive_info["archives"]:
         archive_id = str(archive["archive_id"])
         if archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE:
-            log(f"Freezing archive {archive['archive_id']}")
+            log(f"Uploading archive {archive['archive_id']}")
 
             with tempfile.TemporaryDirectory() as tmpdirname:
                 archive_zip = zipfile.ZipFile(f"{tmpdirname}/archive.zip", "w")
@@ -347,7 +356,7 @@ def main(aws_bucket_name, source_dir):
 
             archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN
 
-    # Delete staged files that are not on the filesystem
+    log("Deleting staged files that are not on the filesystem")
     for obj in bucket_objects:
         if obj.key.startswith("stage/"):
             object_key = obj.key.removeprefix("stage/")
@@ -387,8 +396,11 @@ def main(aws_bucket_name, source_dir):
             archive["size"] += data["size"]
 
     # Save the archive_info at the end to ensure we have the most up to date information
+    log("Saving archive state to cloud")
     save_archive_info_to_bucket(aws_bucket_name, archive_info)
     save_agent_state_to_bucket(aws_bucket_name, AGENT_STATE_COMPLETE)
+
+    log("Finished")
 
 
 if __name__ == "__main__":
