@@ -37,6 +37,9 @@ purge_archive_info = False
 # All other folders are generated and should be regenerated on a rebuild
 immich_working_dirs = ["backups", "upload"]
 
+agent_state_file_name = "agent-state.json"
+archive_state_file_name = "archive.json"
+
 
 def enable_log():
     global log_enabled
@@ -189,7 +192,7 @@ def load_archive_info_from_bucket(bucket_name):
     s3_client = boto3.client("s3")
     if not purge_archive_info:
         try:
-            response = s3_client.get_object(Bucket=bucket_name, Key="archive.json")
+            response = s3_client.get_object(Bucket=bucket_name, Key=archive_state_file_name)
             archive_info = json.loads(response["Body"].read())
         except botocore.exceptions.ClientError as e:
             # If the file does not exist, we will create a new one
@@ -201,10 +204,10 @@ def load_archive_info_from_bucket(bucket_name):
 def save_archive_info_to_bucket(bucket_name, archive_info):
 
     s3_client = boto3.client("s3")
-    s3_client.put_object(Bucket=bucket_name, Key="archive.json", Body=json.dumps(archive_info))
+    s3_client.put_object(Bucket=bucket_name, Key=archive_state_file_name, Body=json.dumps(archive_info))
 
     # Save the archive_info to disk for debugging
-    with open(f"{os.path.dirname(os.path.realpath(__file__))}/archive.debug.json", "w+") as f:
+    with open(f"{os.path.dirname(os.path.realpath(__file__))}/{archive_state_file_name}", "w+") as f:
         json.dump(archive_info, f, indent=4)
 
 
@@ -221,7 +224,7 @@ def save_agent_state_to_bucket(bucket_name, agent_state):
     }
 
     s3_client = boto3.client("s3")
-    s3_client.put_object(Bucket=bucket_name, Key=".agent-state", Body=json.dumps(body))
+    s3_client.put_object(Bucket=bucket_name, Key=agent_state_file_name, Body=json.dumps(body))
 
 
 def load_agent_state_from_bucket(bucket_name):
@@ -229,7 +232,7 @@ def load_agent_state_from_bucket(bucket_name):
 
     s3_client = boto3.client("s3")
     try:
-        response = s3_client.get_object(Bucket=bucket_name, Key=".agent-state")
+        response = s3_client.get_object(Bucket=bucket_name, Key=agent_state_file_name)
         agent_state = json.loads(response["Body"].read())
         agent_state = agent_state["agent_state"]
     except botocore.exceptions.ClientError as e:
@@ -245,11 +248,10 @@ def main(aws_bucket_name, source_dir):
     bucket_object_keys = [obj.key for obj in bucket_objects]
     disk_objects = {}
 
-    agent_state = load_agent_state_from_bucket(aws_bucket_name)
     archive_info = load_archive_info_from_bucket(aws_bucket_name)
 
     # If the agent state was processing then we need to validate that all archives have been written
-    if agent_state == AGENT_STATE_PROCESSING:
+    if load_agent_state_from_bucket(aws_bucket_name) == AGENT_STATE_PROCESSING:
         log(f"Agent state was processing, checking archives for consistency...")
         for archive in archive_info["archives"]:
             archive_key = f"archive/archive-{archive['archive_id']}.zip"
@@ -264,7 +266,7 @@ def main(aws_bucket_name, source_dir):
                 archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE
 
             # The archive was supposed to be uploaded and it does exist
-            if archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE and archive_exists:
+            elif archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE and archive_exists:
                 log(f"      Archive exists on remote storage, marking as uploaded")
                 # Setting this status will prevent further processing as its already uploaded
                 archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN
