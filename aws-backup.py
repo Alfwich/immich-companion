@@ -78,6 +78,12 @@ def new_archive_info():
     }
 
 
+ARCHIVE_ASSET_STATUS_EMPTY = 0
+ARCHIVE_ASSET_STATUS_UNLOCKED = 1
+ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE = 2
+ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN = 3
+
+
 def add_new_archive_data_info_to_archive_info(archive_info):
     archive_data_info = {
         "version": archive_version,
@@ -116,11 +122,6 @@ def new_asset_info_archive_info(size):
 
 
 def add_asset_to_archive_info(archive_info, asset_path, object_key):
-
-    if "_key_to_asset_path" not in archive_info:
-        archive_info["_key_to_asset_path"] = {}
-
-    archive_info["_key_to_asset_path"][object_key] = asset_path
 
     archive = get_next_archive_from_archive_info(archive_info)
     asset_in_archive_info = object_key in archive_info["assets"]
@@ -199,42 +200,94 @@ def load_archive_info_from_bucket(bucket_name):
 
 def save_archive_info_to_bucket(bucket_name, archive_info):
 
-    # Remove any generated keys that don't need to be stored
-    archive_info_keys = set(archive_info.keys())
-    for key in archive_info_keys:
-        if key.startswith("_"):
-            del archive_info[key]
-
     s3_client = boto3.client("s3")
-    # s3_client.put_object(Bucket=bucket_name, Key="archive.json", Body=json.dumps(archive_info))
+    s3_client.put_object(Bucket=bucket_name, Key="archive.json", Body=json.dumps(archive_info))
 
+    # Save the archive_info to disk for debugging
     with open(f"{os.path.dirname(os.path.realpath(__file__))}/archive.debug.json", "w+") as f:
         json.dump(archive_info, f, indent=4)
 
 
-ARCHIVE_ASSET_STATUS_EMPTY = 0
-ARCHIVE_ASSET_STATUS_UNLOCKED = 1
-ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE = 2
-ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN = 3
+AGENT_STATE_UNKNOWN = 0
+AGENT_STATE_PROCESSING = 1
+AGENT_STATE_COMPLETE = 2
+
+
+def save_agent_state_to_bucket(bucket_name, agent_state):
+
+    body = {
+        "version": archive_version,
+        "agent_state": agent_state,
+    }
+
+    s3_client = boto3.client("s3")
+    s3_client.put_object(Bucket=bucket_name, Key=".agent-state", Body=json.dumps(body))
+
+
+def load_agent_state_from_bucket(bucket_name):
+    agent_state = AGENT_STATE_UNKNOWN
+
+    s3_client = boto3.client("s3")
+    try:
+        response = s3_client.get_object(Bucket=bucket_name, Key=".agent-state")
+        agent_state = json.loads(response["Body"].read())
+        agent_state = agent_state["agent_state"]
+    except botocore.exceptions.ClientError as e:
+        # If the file does not exist, we will create a new one
+        pass
+
+    return agent_state
 
 
 def main(aws_bucket_name, source_dir):
 
     bucket_objects = list_bucket(aws_bucket_name)
-    bucket_objects_keys = set([obj.key for obj in bucket_objects])
-    disk_objects = set()
+    bucket_object_keys = [obj.key for obj in bucket_objects]
+    disk_objects = {}
 
+    agent_state = load_agent_state_from_bucket(aws_bucket_name)
     archive_info = load_archive_info_from_bucket(aws_bucket_name)
 
-    log(f"source_dir: {source_dir}")
+    # If the agent state was processing then we need to validate that all archives have been written
+    if agent_state == AGENT_STATE_PROCESSING:
+        log(f"Agent state was processing, checking archives for consistency...")
+        for archive in archive_info["archives"]:
+            archive_key = f"archive/archive-{archive['archive_id']}.zip"
+            archive_exists = archive_key in bucket_object_keys
 
+            log(f"  Checking archive {archive['archive_id']} -> status: {archive['status']}")
+            log(f"      Archive exists: {archive_exists}")
+
+            # The archive was supposed to be uploaded, but it does not exist
+            if archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN and not archive_exists:
+                log(f"      Archive does not exist on remote storage, marking as unlocked")
+                archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE
+
+            # The archive was supposed to be uploaded and it does exist
+            if archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE and archive_exists:
+                log(f"      Archive exists on remote storage, marking as uploaded")
+                # Setting this status will prevent further processing as its already uploaded
+                archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN
+
+                # Update asset states that are in the archive to mark they are stored
+                for asset in archive_info["assets"]:
+                    if archive["archive_id"] in archive_info["assets"][asset]["archives"]:
+                        archive_info["assets"][asset]["archives"][archive["archive_id"]]["status"] = ASSET_STATUS_STORED
+
+    log(f"Working in source_dir: {source_dir}")
+
+    # Walk the source directory and add all assets to the archive_info
     for folder in immich_working_dirs:
         for root, dir, files in os.walk(f"{source_dir}/{folder}"):
             for file_name in fnmatch.filter(files, "*"):
                 asset_path = f"{root}/{file_name}"
                 object_key = asset_path.removeprefix(f"{source_dir}/").replace("\\", "/")
-                disk_objects.add(object_key)
+                disk_objects[object_key] = asset_path
                 add_asset_to_archive_info(archive_info, asset_path, object_key)
+
+    # Save the archive_info to the bucket before we do any operations on it in-case of failure
+    save_archive_info_to_bucket(aws_bucket_name, archive_info)
+    save_agent_state_to_bucket(aws_bucket_name, AGENT_STATE_PROCESSING)
 
     # Upload assets that are fresh and are contained in an unlocked archive
     for asset in archive_info["assets"]:
@@ -248,9 +301,9 @@ def main(aws_bucket_name, source_dir):
                 data["status"] = ASSET_STATUS_STORED
 
         # Directly upload fresh assets as they are either new or updated
-        if should_upload:
+        if should_upload and asset in disk_objects:
             stage_key = f"stage/{asset}"
-            upload_file_aws_object(archive_info["_key_to_asset_path"][asset], aws_bucket_name, stage_key)
+            upload_file_aws_object(disk_objects[asset], aws_bucket_name, stage_key)
 
     # Prune any assets that are not staged nor are on disk
     archive_info_keys = set(archive_info["assets"].keys())
@@ -268,7 +321,6 @@ def main(aws_bucket_name, source_dir):
                 archive["size"] -= archive_info["assets"][key]["archives"][archive_id]["size"]
             del archive_info["assets"][key]
 
-    archived_object_keys = set()
     for archive in archive_info["archives"]:
         archive_id = str(archive["archive_id"])
         if archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE:
@@ -278,12 +330,14 @@ def main(aws_bucket_name, source_dir):
                 archive_zip = zipfile.ZipFile(f"{tmpdirname}/archive.zip", "w")
                 for object_key in archive_info["assets"]:
                     if archive_id in archive_info["assets"][object_key]["archives"]:
-                        log(f"  writing {object_key} to archive")
-                        asset_path = archive_info["_key_to_asset_path"][object_key]
-                        if upload_enabled:
-                            archive_zip.write(asset_path, object_key)
-                        archived_object_keys.add(object_key)
-                        archive_info["assets"][object_key]["archives"][archive_id]["status"] = ASSET_STATUS_STORED
+                        if object_key in disk_objects:
+                            log(f"  writing {object_key} to archive")
+                            asset_path = disk_objects[object_key]
+                            if upload_enabled:
+                                archive_zip.write(asset_path, object_key)
+                            archive_info["assets"][object_key]["archives"][archive_id]["status"] = ASSET_STATUS_STORED
+                        else:
+                            log(f"  skipping {object_key} in archive as it does not exist on the filesystem")
 
                 archive_zip.close()
 
@@ -300,7 +354,7 @@ def main(aws_bucket_name, source_dir):
                 log(f"Deleting staged object {obj.key}")
                 obj.delete()
 
-                # If the asset is in a frozen archive we should not delete it
+                # If the asset is in a frozen archive we should not delete its record
                 in_frozen_archive = False
                 for archive in archive_info["assets"][object_key]["archives"]:
                     if archive_info["archives"][int(archive)]["status"] == ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN:
@@ -308,10 +362,18 @@ def main(aws_bucket_name, source_dir):
 
                 if object_key in archive_info["assets"]:
                     del archive_info["assets"][object_key]
-            # If we archived this object, we should delete the staged version
-            elif object_key in archived_object_keys:
-                log(f"Deleting staged object {obj.key}")
-                obj.delete()
+
+            # Check to see if we have archived this asset, if so we should delete the staged object
+            elif object_key in archive_info["assets"]:
+                in_unlocked_archive = False
+                for archive in archive_info["assets"][object_key]["archives"]:
+                    if archive_info["archives"][int(archive)]["status"] == ARCHIVE_ASSET_STATUS_UNLOCKED:
+                        in_unlocked_archive = True
+
+                # If the object is not in any unlocked archive we can safely delete it
+                if not in_unlocked_archive:
+                    log(f"Deleting staged object {obj.key}")
+                    obj.delete()
 
     # True up the archive sizes for deleted keys
     for archive in archive_info["archives"]:
@@ -322,7 +384,9 @@ def main(aws_bucket_name, source_dir):
             archive = archive_info["archives"][int(archive_id)]
             archive["size"] += data["size"]
 
+    # Save the archive_info at the end to ensure we have the most up to date information
     save_archive_info_to_bucket(aws_bucket_name, archive_info)
+    save_agent_state_to_bucket(aws_bucket_name, AGENT_STATE_COMPLETE)
 
 
 if __name__ == "__main__":
