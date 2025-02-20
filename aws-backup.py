@@ -6,6 +6,7 @@ import fnmatch
 import zipfile
 import botocore
 import json
+import hashlib
 from pathlib import Path
 
 from datetime import datetime
@@ -78,9 +79,23 @@ def upload_file_aws_object(file_name, bucket_name, location):
         # s3_resource.Object(bucket_name, location).put(Body=open(file_name, 'rb'), StorageClass="DEEP_ARCHIVE")
 
 
+def hash_string_list(l):
+    if len(l) == 0:
+        return ""
+
+    encoded = "".join(sorted(l)).encode("utf-8")
+    hash = hashlib.sha256(encoded)
+    return hash.hexdigest()
+
+
+def get_hash_for_archive_info(archive_info):
+    return hash_string_list(list(archive_info["assets"].keys()) + list(map(lambda x: f"archive-{x['archive_id']}:{x['status']}", archive_info["archives"])))
+
+
 def new_archive_info():
     return {
         "version": archive_version,
+        "hash": "",
         "archives": [],
         "assets": {},
         "last_updated": datetime.now().isoformat(),
@@ -129,7 +144,7 @@ def add_asset_to_archive_info(archive_info, asset_path, object_key):
 
     # If the asset is not in the archive_info, then its new and we should add it to the first unlocked archive
     if not asset_in_archive_info:
-        log(f"Adding asset {asset_path} to archive")
+        log(f"    Adding asset {asset_path} to archive")
         new_asset = new_asset_info(disk_asset_size, str(archive["archive_id"]))
         archive_info["assets"][object_key] = new_asset
         archive["size"] += disk_asset_size
@@ -198,6 +213,7 @@ def load_archive_info_from_bucket(bucket_name):
 
 def save_archive_info_to_bucket(bucket_name, archive_info):
 
+    log(f"Saving archive info to bucket: {bucket_name}, archive hash: {archive_info['hash']}")
     s3_client = boto3.client("s3")
     s3_client.put_object(Bucket=bucket_name, Key=archive_state_file_name, Body=json.dumps(archive_info))
 
@@ -243,10 +259,11 @@ def main(aws_bucket_name, source_dir):
     bucket_object_keys = [obj.key for obj in bucket_objects]
     disk_objects = {}
 
+    agent_state = load_agent_state_from_bucket(aws_bucket_name)
     archive_info = load_archive_info_from_bucket(aws_bucket_name)
 
     # If the agent was never completed we should ensure archive consistency, as possible
-    if load_agent_state_from_bucket(aws_bucket_name) != AGENT_STATE_COMPLETE:
+    if agent_state != AGENT_STATE_COMPLETE:
         log(f"Agent state was processing, checking archives for consistency...")
         for archive in archive_info["archives"]:
             archive_key = f"archive/archive-{archive['archive_id']}.zip"
@@ -272,6 +289,7 @@ def main(aws_bucket_name, source_dir):
                         archive_info["assets"][asset]["archives"][archive["archive_id"]]["status"] = ASSET_STATUS_STORED
 
     log(f"Walking the source directory: {source_dir}, and updating asset catalogue")
+    old_archive_info_hash = archive_info["hash"]
     for folder in immich_working_dirs:
         for root, dir, files in os.walk(f"{source_dir}/{folder}"):
             for file_name in fnmatch.filter(files, "*"):
@@ -280,111 +298,121 @@ def main(aws_bucket_name, source_dir):
                 disk_objects[object_key] = asset_path
                 add_asset_to_archive_info(archive_info, asset_path, object_key)
 
-    # Save the archive_info to the bucket before we do any operations on it in-case of failure
-    save_archive_info_to_bucket(aws_bucket_name, archive_info)
-    save_agent_state_to_bucket(aws_bucket_name, AGENT_STATE_PROCESSING)
+    # Update the hash for the archive
+    archive_info["hash"] = get_hash_for_archive_info(archive_info)
+    if old_archive_info_hash == archive_info["hash"] and not agent_state == AGENT_STATE_PROCESSING:
+        log("Archive has not changed so performing no operations")
 
-    # Upload assets that are fresh and are contained in an unlocked archive
-    log("Checking staged assets for upload")
-    for asset in archive_info["assets"]:
-        should_upload = False
-        asset_data = archive_info["assets"][asset]
+        # Save the archive_info to the bucket before we do any operations on it in-case of failure
+        save_archive_info_to_bucket(aws_bucket_name, archive_info)
+        save_agent_state_to_bucket(aws_bucket_name, AGENT_STATE_PROCESSING)
 
-        for archive_id, data in asset_data["archives"].items():
-            archive = archive_info["archives"][int(archive_id)]
+        # Upload assets that are fresh and are contained in an unlocked archive
+        log("Checking staged assets for upload")
+        for asset in archive_info["assets"]:
+            should_upload = False
+            asset_data = archive_info["assets"][asset]
 
-            # If the archive is unlocked and the object does not exist on cloud storage, upload it again
-            if archive["status"] == ARCHIVE_ASSET_STATUS_UNLOCKED and f"stage/{asset}" not in bucket_object_keys:
-                should_upload = True
-
-        # Directly upload fresh assets as they are either new or updated
-        if should_upload and asset in disk_objects:
-            stage_key = f"stage/{asset}"
-            upload_file_aws_object(disk_objects[asset], aws_bucket_name, stage_key)
-
-    # Prune any assets that are not staged nor are on disk
-    archive_info_keys = set(archive_info["assets"].keys())
-    for key in archive_info_keys:
-
-        # If the asset is in a frozen archive we should not delete it
-        in_frozen_archive = False
-        for archive in archive_info["assets"][key]["archives"]:
-            if archive_info["archives"][int(archive)]["status"] == ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN:
-                in_frozen_archive = True
-
-        if not in_frozen_archive and key not in disk_objects:
-            for archive_id in archive_info["assets"][key]["archives"]:
+            for archive_id, data in asset_data["archives"].items():
                 archive = archive_info["archives"][int(archive_id)]
-                archive["size"] -= archive_info["assets"][key]["archives"][archive_id]["size"]
-            del archive_info["assets"][key]
 
-    log("Checking archives to see if we need to upload any")
-    for archive in archive_info["archives"]:
-        archive_id = str(archive["archive_id"])
-        if archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE:
-            log(f"Uploading archive {archive['archive_id']}")
+                # If the archive is unlocked and the object does not exist on cloud storage, upload it again
+                if archive["status"] == ARCHIVE_ASSET_STATUS_UNLOCKED and f"stage/{asset}" not in bucket_object_keys:
+                    should_upload = True
 
-            with tempfile.TemporaryDirectory() as tmpdirname:
-                archive_zip = zipfile.ZipFile(f"{tmpdirname}/archive.zip", "w")
-                for object_key in archive_info["assets"]:
-                    if archive_id in archive_info["assets"][object_key]["archives"]:
-                        if object_key in disk_objects:
-                            log(f"  Writing {object_key} to archive")
-                            asset_path = disk_objects[object_key]
-                            if upload_enabled:
-                                archive_zip.write(asset_path, object_key)
-                        else:
-                            log(f"  Skipping {object_key} in archive as it does not exist on the filesystem")
+            # Directly upload fresh assets as they are either new or updated
+            if should_upload and asset in disk_objects:
+                stage_key = f"stage/{asset}"
+                upload_file_aws_object(disk_objects[asset], aws_bucket_name, stage_key)
 
-                archive_zip.close()
+        # Prune any assets that are not staged nor are on disk
+        archive_info_keys = set(archive_info["assets"].keys())
+        for key in archive_info_keys:
 
-                upload_file_aws_object(f"{tmpdirname}/archive.zip", aws_bucket_name, f"archive/archive-{archive['archive_id']}.zip")
+            # If the asset is in a frozen archive we should not delete it
+            in_frozen_archive = False
+            for archive in archive_info["assets"][key]["archives"]:
+                if archive_info["archives"][int(archive)]["status"] == ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN:
+                    in_frozen_archive = True
 
-            archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN
+            if not in_frozen_archive and key not in disk_objects:
+                for archive_id in archive_info["assets"][key]["archives"]:
+                    archive = archive_info["archives"][int(archive_id)]
+                    archive["size"] -= archive_info["assets"][key]["archives"][archive_id]["size"]
+                del archive_info["assets"][key]
 
-    log("Deleting staged files that are not on the filesystem")
-    for obj in bucket_objects:
-        if obj.key.startswith("stage/"):
-            object_key = obj.key.removeprefix("stage/")
-            # If this staged object is not on disk, we should delete it
-            if object_key not in disk_objects:
-                log(f"    Deleting staged object {obj.key}")
-                obj.delete()
+        log("Checking archives to see if we need to upload any")
+        for archive in archive_info["archives"]:
+            archive_id = str(archive["archive_id"])
+            if archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE:
+                log(f"Uploading archive {archive['archive_id']}")
 
-                # If the asset is in a frozen archive we should not delete its record
-                in_frozen_archive = False
-                if object_key in archive_info["assets"]:
-                    for archive in archive_info["assets"][object_key]["archives"]:
-                        if archive_info["archives"][int(archive)]["status"] == ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN:
-                            in_frozen_archive = True
+                with tempfile.TemporaryDirectory() as tmpdirname:
+                    archive_zip = zipfile.ZipFile(f"{tmpdirname}/archive.zip", "w")
+                    for object_key in archive_info["assets"]:
+                        if archive_id in archive_info["assets"][object_key]["archives"]:
+                            if object_key in disk_objects:
+                                log(f"  Writing {object_key} to archive")
+                                asset_path = disk_objects[object_key]
+                                if upload_enabled:
+                                    archive_zip.write(asset_path, object_key)
+                            else:
+                                log(f"  Skipping {object_key} in archive as it does not exist on the filesystem")
 
-                if object_key in archive_info["assets"]:
-                    del archive_info["assets"][object_key]
+                    archive_zip.close()
 
-            # Check to see if we have archived this asset, if so we should delete the staged object
-            elif object_key in archive_info["assets"]:
-                in_unlocked_archive = False
-                for archive in archive_info["assets"][object_key]["archives"]:
-                    if archive_info["archives"][int(archive)]["status"] == ARCHIVE_ASSET_STATUS_UNLOCKED:
-                        in_unlocked_archive = True
+                    upload_file_aws_object(f"{tmpdirname}/archive.zip", aws_bucket_name, f"archive/archive-{archive['archive_id']}.zip")
 
-                # If the object is not in any unlocked archive we can safely delete it
-                if not in_unlocked_archive:
-                    log(f"Deleting staged object {obj.key}")
+                archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN
+
+        log("Deleting staged files that are not on the filesystem")
+        for obj in bucket_objects:
+            if obj.key.startswith("stage/"):
+                object_key = obj.key.removeprefix("stage/")
+                # If this staged object is not on disk, we should delete it
+                if object_key not in disk_objects:
+                    log(f"    Deleting staged object {obj.key}")
                     obj.delete()
 
-    # True up the archive sizes for deleted keys
-    for archive in archive_info["archives"]:
-        archive["size"] = 0
+                    # If the asset is in a frozen archive we should not delete its record
+                    in_frozen_archive = False
+                    if object_key in archive_info["assets"]:
+                        for archive in archive_info["assets"][object_key]["archives"]:
+                            if archive_info["archives"][int(archive)]["status"] == ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN:
+                                in_frozen_archive = True
 
-    for asset in archive_info["assets"]:
-        for archive_id, data in archive_info["assets"][asset]["archives"].items():
-            archive = archive_info["archives"][int(archive_id)]
-            archive["size"] += data["size"]
+                    if object_key in archive_info["assets"]:
+                        del archive_info["assets"][object_key]
 
-    # Save the archive_info at the end to ensure we have the most up to date information
-    log("Saving archive state to cloud")
-    save_archive_info_to_bucket(aws_bucket_name, archive_info)
+                # Check to see if we have archived this asset, if so we should delete the staged object
+                elif object_key in archive_info["assets"]:
+                    in_unlocked_archive = False
+                    for archive in archive_info["assets"][object_key]["archives"]:
+                        if archive_info["archives"][int(archive)]["status"] == ARCHIVE_ASSET_STATUS_UNLOCKED:
+                            in_unlocked_archive = True
+
+                    # If the object is not in any unlocked archive we can safely delete it
+                    if not in_unlocked_archive:
+                        log(f"Deleting staged object {obj.key}")
+                        obj.delete()
+
+        # True up the archive sizes for deleted keys
+        for archive in archive_info["archives"]:
+            archive["size"] = 0
+
+        for asset in archive_info["assets"]:
+            for archive_id, data in archive_info["assets"][asset]["archives"].items():
+                archive = archive_info["archives"][int(archive_id)]
+                archive["size"] += data["size"]
+
+        # Save the archive_info at the end to ensure we have the most up to date information
+
+        old_archive_info_hash = archive_info["hash"]
+        archive_info["hash"] = get_hash_for_archive_info(archive_info)
+        if old_archive_info_hash != archive_info["hash"]:
+            log("Saving archive state to cloud as it was modified during processing")
+            save_archive_info_to_bucket(aws_bucket_name, archive_info)
+
     save_agent_state_to_bucket(aws_bucket_name, AGENT_STATE_COMPLETE)
 
     log("Finished")
