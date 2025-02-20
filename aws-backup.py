@@ -206,9 +206,9 @@ def save_archive_info_to_bucket(bucket_name, archive_info):
             del archive_info[key]
 
     s3_client = boto3.client("s3")
-    s3_client.put_object(Bucket=bucket_name, Key="archive.json", Body=json.dumps(archive_info))
+    # s3_client.put_object(Bucket=bucket_name, Key="archive.json", Body=json.dumps(archive_info))
 
-    with open("archive.debug.json", "w+") as f:
+    with open(f"{os.path.dirname(os.path.realpath(__file__))}/archive.debug.json", "w+") as f:
         json.dump(archive_info, f, indent=4)
 
 
