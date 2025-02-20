@@ -21,7 +21,7 @@ archive_size_threshold = 1024 * 1024 * 1024 * 5  # 5 GiB
 
 # Unlocked archives will be locked and uploaded to deep storage after 30 days if its over 1 GiB
 archive_age_threshold = 86400 * 30  # 30 days
-archive_age_and_size_threshold = 1024 * 1024 * 1024  # 1 GiB
+archive_age_and_size_threshold = 1024 * 1024 * 512  # 512 MiB
 
 log_enabled = True
 
@@ -62,6 +62,20 @@ def log(msg):
         print(log_msg)
         if not log_file.closed:
             log_file.write(f"{log_msg}\n")
+
+
+def log_execution_parameters():
+    log(f"Execution parameters")
+    log(f"    archive_version: {archive_version}")
+    log(f"    archive_size_threshold: {int(archive_size_threshold / 1024 / 1024)} MiB")
+    log(f"    archive_age_threshold: {int(archive_age_threshold / 86400)} Days")
+    log(f"    archive_age_and_size_threshold: {int(archive_age_and_size_threshold / 1024 / 1024)} MiB")
+    log(f"    upload_enabled: {upload_enabled}")
+    log(f"    purge_enabled: {purge_enabled}")
+    log(f"    purge_archive_info: {purge_archive_info}")
+    log(f"    immich_working_dirs: {immich_working_dirs}")
+    log(f"    agent_state_file_name: {agent_state_file_name}")
+    log(f"    archive_state_file_name: {archive_state_file_name}")
 
 
 def list_bucket(bucket_name):
@@ -229,7 +243,7 @@ def load_archive_info_from_bucket(bucket_name):
     for archive in archive_info["archives"]:
         if archive["status"] == ARCHIVE_ASSET_STATUS_UNLOCKED:
             num_objects = count_number_of_assets_in_archive(archive_info, archive["archive_id"])
-            log(f" Current open archive id: {archive['archive_id']}, unlock_date: {archive['unlock_date']}, size: {archive['size']}, num_objects: {num_objects}")
+            log(f"    Current open archive id: {archive['archive_id']}, unlock_date: {archive['unlock_date']}, size: {int(archive['size']/1024/1024)} MiB, num_objects: {num_objects}")
 
     return archive_info
 
@@ -284,6 +298,8 @@ def main(aws_bucket_name, source_dir):
 
     agent_state = load_agent_state_from_bucket(aws_bucket_name)
     archive_info = load_archive_info_from_bucket(aws_bucket_name)
+
+    log_execution_parameters()
 
     # If the agent was never completed we should ensure archive consistency, as possible
     if agent_state != AGENT_STATE_COMPLETE:
