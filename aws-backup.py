@@ -16,12 +16,18 @@ import botocore.exceptions
 
 archive_version = 0.1
 
-# Archives this big will get immediatlly locked and uploaded to deep storage
+# Archives this big will get immediately locked and uploaded to deep storage while processing
 archive_size_threshold = 1024 * 1024 * 1024 * 5  # 5 GiB
 
-# Unlocked archives will be locked and uploaded to deep storage after 30 days if its over 1 GiB
-archive_age_threshold = 86400 * 30  # 30 days
+# Unlocked archives will be locked and uploaded to deep storage if:
+# - The archive size is greater than 512 MiB and has been staged for a least 7 days
+archive_age_threshold = 86400 * 7  # 7 days
 archive_age_and_size_threshold = 1024 * 1024 * 512  # 512 MiB
+
+# Max amount of time in seconds that the processing can run.
+# Any uploads for archives or stages assets will be
+# picked back up on the next run of the backup tool
+max_processing_time = 60 * 60 * 22  # 22 Hours
 
 log_enabled = True
 
@@ -29,6 +35,7 @@ log_enabled = True
 upload_enabled = False
 
 # TODO(aw): This should provide a way to prune archives that have a lot of deleted assets
+#           Currently archives that have been frozen are considered immutable
 purge_enabled = False
 
 # DANGER: This will delete the archive info file and destroy all information about the archive
@@ -44,6 +51,8 @@ archive_state_file_name = "archive.json"
 log_file_name = f"backup-log.{datetime.now().timestamp()}.txt"
 log_file = open(f"{os.path.dirname(os.path.realpath(__file__))}/{log_file_name}", "w+")
 
+start_timestamp = datetime.now(dt.UTC).timestamp()
+
 
 def enable_log():
     global log_enabled
@@ -53,6 +62,10 @@ def enable_log():
 def disable_log():
     global log_enabled
     log_enabled = False
+
+
+def within_timelimit():
+    return datetime.now(dt.UTC).timestamp() - start_timestamp <= max_processing_time
 
 
 def log(msg):
@@ -70,6 +83,7 @@ def log_execution_parameters():
     log(f"    archive_size_threshold: {int(archive_size_threshold / 1024 / 1024)} MiB")
     log(f"    archive_age_threshold: {int(archive_age_threshold / 86400)} Days")
     log(f"    archive_age_and_size_threshold: {int(archive_age_and_size_threshold / 1024 / 1024)} MiB")
+    log(f"    max_processing_time: {int(max_processing_time / 60 / 60)} Hours")
     log(f"    upload_enabled: {upload_enabled}")
     log(f"    purge_enabled: {purge_enabled}")
     log(f"    purge_archive_info: {purge_archive_info}")
@@ -102,8 +116,18 @@ def hash_string_list(l):
     return hash.hexdigest()
 
 
+def get_asset_hash(asset_key, asset):
+    asset_archive_keys = [asset_key]
+    for id, value in asset["archives"].items():
+        asset_archive_keys.append(f"{id}-{value['size']}")
+    return ":".join(asset_archive_keys)
+
+
 def get_hash_for_archive_info(archive_info):
-    return hash_string_list(list(archive_info["assets"].keys()) + list(map(lambda x: f"archive-{x['archive_id']}:{x['status']}", archive_info["archives"])))
+    asset_keys = list(map(lambda x: get_asset_hash(x[0], x[1]), archive_info["assets"].items()))
+    archive_keys = list(map(lambda x: f"archive-{x['archive_id']}:{x['status']}", archive_info["archives"]))
+
+    return hash_string_list(asset_keys + archive_keys)
 
 
 def new_archive_info():
@@ -199,7 +223,7 @@ def add_asset_to_archive_info(archive_info, asset_path, object_key):
     # - Archive size is above the max archive size, we immediatly move this into long-term storage
     # - Archive is old enough, and within a reasonable size, that we should move it into long-term storage
     if archive_is_unlocked and (is_above_size_threshold or is_old_and_above_size_threshold):
-        log(f"    Locking archive id: {archive['archive_id']}")
+        log(f"    Locking archive id: {archive['archive_id']}, size: {int(archive['size'] / 1024 / 1024)} MiB, as its over {int(archive_size_threshold / 1024 / 1024)} MiB")
         archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE
 
 
@@ -302,8 +326,8 @@ def main(aws_bucket_name, source_dir):
     log_execution_parameters()
 
     # If the agent was never completed we should ensure archive consistency, as possible
-    if agent_state != AGENT_STATE_COMPLETE:
-        log(f"Agent state was processing, checking archives for consistency...")
+    if agent_state == AGENT_STATE_COMPLETE:
+        log(f"Agent state was processing, or unknown, checking archives for consistency...")
         for archive in archive_info["archives"]:
             archive_key = f"archive/archive-{archive['archive_id']}.zip"
             archive_exists = archive_key in bucket_object_keys
@@ -321,11 +345,6 @@ def main(aws_bucket_name, source_dir):
                 log(f"      Archive exists on remote storage, marking as uploaded")
                 # Setting this status will prevent further processing as its already uploaded
                 archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN
-
-                # Update asset states that are in the archive to mark they are stored
-                for asset in archive_info["assets"]:
-                    if archive["archive_id"] in archive_info["assets"][asset]["archives"]:
-                        archive_info["assets"][asset]["archives"][archive["archive_id"]]["status"] = ASSET_STATUS_STORED
 
     log(f"Walking the source directory: {source_dir}, and updating asset catalogue")
     old_archive_info_hash = archive_info["hash"]
@@ -360,8 +379,8 @@ def main(aws_bucket_name, source_dir):
             if archive["status"] == ARCHIVE_ASSET_STATUS_UNLOCKED and f"stage/{asset}" not in bucket_object_keys:
                 should_upload = True
 
-        # Directly upload fresh assets as they are either new or updated
-        if should_upload and asset in disk_objects:
+        # Directly upload fresh assets as they are either new or updated and we have time
+        if should_upload and asset in disk_objects and within_timelimit():
             stage_key = f"stage/{asset}"
             upload_file_aws_object(disk_objects[asset], aws_bucket_name, stage_key)
 
@@ -385,7 +404,9 @@ def main(aws_bucket_name, source_dir):
     log("Checking archives to see if we need to upload any")
     for archive in archive_info["archives"]:
         archive_id = str(archive["archive_id"])
-        if archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE:
+
+        # If the archive is pending freeze, and we have time, process the archive and upload it
+        if archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE and within_timelimit():
             log(f"Uploading archive {archive['archive_id']}")
 
             with tempfile.TemporaryDirectory() as tmpdirname:
