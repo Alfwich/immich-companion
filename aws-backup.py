@@ -379,17 +379,17 @@ def main(aws_bucket_name, backup_dir):
             archive_key = f"archive/archive-{archive['archive_id']}.zip"
             archive_exists = archive_key in bucket_object_keys
 
-            log(f"  Checking archive {archive['archive_id']} -> status: {archive['status']}")
-            log(f"      Archive exists: {archive_exists}")
+            log(f"    Checking archive {archive['archive_id']} -> status: {archive['status']}")
+            log(f"        Archive exists: {archive_exists}")
 
             # The archive was supposed to be uploaded, but it does not exist
             if archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN and not archive_exists:
-                log(f"      Archive does not exist on remote storage, marking as pending upload")
+                log(f"    Archive does not exist on remote storage, marking as pending upload")
                 archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE
 
             # The archive was supposed to be uploaded and it does exist
             elif archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE and archive_exists:
-                log(f"      Archive exists on remote storage, marking as uploaded")
+                log(f"    Archive exists on remote storage, marking as uploaded")
                 # Setting this status will prevent further processing as its already uploaded
                 archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN
 
@@ -490,12 +490,12 @@ def main(aws_bucket_name, backup_dir):
                 for object_key in archive_info["assets"]:
                     if archive_id in archive_info["assets"][object_key]["archives"]:
                         if object_key in disk_objects:
-                            log(f"  Writing {object_key} to archive")
+                            log(f"    Writing {object_key} to archive")
                             asset_path = disk_objects[object_key]
                             if upload_enabled:
                                 archive_zip.write(asset_path, object_key)
                         else:
-                            log(f"  Skipping {object_key} in archive as it does not exist on the filesystem")
+                            log(f"    Skipping {object_key} in archive as it does not exist on the filesystem")
 
                 archive_zip.close()
 
