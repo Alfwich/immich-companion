@@ -281,6 +281,13 @@ def load_archive_info_from_bucket(bucket_name):
             num_objects = count_number_of_assets_in_archive(archive_info, archive["archive_id"])
             log(f"    Current open archive id: {archive['archive_id']}, unlock_date: {archive['unlock_date']}, size: {int(archive['size']/1024/1024)} MiB, num_objects: {num_objects}")
 
+            unlock_date = int(archive['unlock_date'])
+            if unlock_date > 0:
+                archive_unlock_age = int(datetime.now(dt.UTC).timestamp()) - unlock_date
+                time_until_unlock = archive_age_threshold - archive_unlock_age
+                time_until_unlock_message = "NOW" if time_until_unlock <= 0 else f"{(time_until_unlock / 60 / 60):.2f} hr"
+                log(f"        Time until archive lock and archive: {time_until_unlock_message}")
+
     log(f"    Total number of objects stored: {len(archive_info['assets'])}, total archives in backup: {len(archive_info['archives'])}, total size: {int(total_backup_size / 1024 / 1024)} MiB")
 
     return archive_info
@@ -338,16 +345,32 @@ def upload_stage_only_assets(stage_only_assets, aws_bucket_name):
             upload_file_aws_object(asset_path, aws_bucket_name, stage_key)
 
 
+def update_archive_size_for_assets(archive_info):
+    for archive in archive_info["archives"]:
+        archive["size"] = 0
+
+    for asset in archive_info["assets"]:
+        for archive_id, data in archive_info["assets"][asset]["archives"].items():
+            archive = archive_info["archives"][int(archive_id)]
+            archive["size"] += data["size"]
+
+    # If any of the archives are empty, we should mark it as empty and remove the unlock_date
+    for archive in archive_info["archives"]:
+        if archive["size"] == 0 and archive["status"] == ARCHIVE_ASSET_STATUS_UNLOCKED or archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE:
+            archive["status"] = ARCHIVE_ASSET_STATUS_EMPTY
+            archive["unlock_date"] = 0
+
+
 def main(aws_bucket_name, backup_dir):
 
     bucket_objects = list_bucket(aws_bucket_name)
     bucket_object_keys = [obj.key for obj in bucket_objects]
     disk_objects = {}
 
+    log_execution_parameters()
+
     agent_state = load_agent_state_from_bucket(aws_bucket_name)
     archive_info = load_archive_info_from_bucket(aws_bucket_name)
-
-    log_execution_parameters()
 
     # If the agent was never completed we should ensure archive consistency, as possible
     if agent_state != AGENT_STATE_COMPLETE:
@@ -512,13 +535,7 @@ def main(aws_bucket_name, backup_dir):
                     obj.delete()
 
     # True up the archive sizes for deleted keys
-    for archive in archive_info["archives"]:
-        archive["size"] = 0
-
-    for asset in archive_info["assets"]:
-        for archive_id, data in archive_info["assets"][asset]["archives"].items():
-            archive = archive_info["archives"][int(archive_id)]
-            archive["size"] += data["size"]
+    update_archive_size_for_assets(archive_info)
 
     # Save the archive_info at the end to ensure we have the most up to date information
 
