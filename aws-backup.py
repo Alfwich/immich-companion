@@ -326,7 +326,7 @@ def main(aws_bucket_name, source_dir):
     log_execution_parameters()
 
     # If the agent was never completed we should ensure archive consistency, as possible
-    if agent_state == AGENT_STATE_COMPLETE:
+    if agent_state != AGENT_STATE_COMPLETE:
         log(f"Agent state was processing, or unknown, checking archives for consistency...")
         for archive in archive_info["archives"]:
             archive_key = f"archive/archive-{archive['archive_id']}.zip"
