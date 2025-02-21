@@ -17,10 +17,10 @@ import botocore.exceptions
 archive_version = 0.1
 
 # Archives this big will get immediately locked and uploaded to deep storage while processing
-archive_size_threshold = 1024 * 1024 * 1024 * 5  # 5 GiB
+archive_size_threshold = 1024 * 1024 * 1024 * 1  # 1 GiB
 
 # Unlocked archives will be locked and uploaded to deep storage if:
-# - The archive size is greater than 512 MiB and has been staged for a least 7 days
+# - The archive size is greater than 512 MiB and has been staged for at least 7 days
 archive_age_threshold = 86400 * 7  # 7 days
 archive_age_and_size_threshold = 1024 * 1024 * 512  # 512 MiB
 
@@ -43,7 +43,15 @@ purge_archive_info = False
 
 # We should find all these directories when doing the backup upload
 # All other folders are generated and should be regenerated on a rebuild
-immich_working_dirs = ["backups", "upload"]
+immich_working_dirs = ["immich/upload"]
+
+# Custom directory that can be used to put any file for long-term storage
+custom_working_dirs = ["backup"]
+
+# Directories that will never be put into long-term storage and will forever live in
+# standard storage. These files are expected to be changing frequently and size management should
+# be enforced by the processes that place files into this directory
+stage_only_working_dirs = ["immich/backups"]
 
 agent_state_file_name = "agent-state.json"
 archive_state_file_name = "archive.json"
@@ -88,6 +96,8 @@ def log_execution_parameters():
     log(f"    purge_enabled: {purge_enabled}")
     log(f"    purge_archive_info: {purge_archive_info}")
     log(f"    immich_working_dirs: {immich_working_dirs}")
+    log(f"    stage_only_working_dirs: {stage_only_working_dirs}")
+    log(f"    custom_working_dirs: {custom_working_dirs}")
     log(f"    agent_state_file_name: {agent_state_file_name}")
     log(f"    archive_state_file_name: {archive_state_file_name}")
 
@@ -99,7 +109,7 @@ def list_bucket(bucket_name):
 
 
 def upload_file_aws_object(file_name, bucket_name, location):
-    log(f"  Upload file_name: {file_name}, to bucket_name: {bucket_name}, to location: {location}")
+    log(f"    Upload file_name: {file_name}, to bucket_name: {bucket_name}, to location: {location}")
     if upload_enabled:
         s3_resource = boto3.resource("s3")
         s3_resource.Object(bucket_name, location).put(Body=open(file_name, 'rb'), StorageClass="STANDARD")
@@ -264,10 +274,14 @@ def load_archive_info_from_bucket(bucket_name):
             # If the file does not exist, we will create a new one
             pass
 
+    total_backup_size = 0
     for archive in archive_info["archives"]:
+        total_backup_size += archive["size"]
         if archive["status"] == ARCHIVE_ASSET_STATUS_UNLOCKED:
             num_objects = count_number_of_assets_in_archive(archive_info, archive["archive_id"])
             log(f"    Current open archive id: {archive['archive_id']}, unlock_date: {archive['unlock_date']}, size: {int(archive['size']/1024/1024)} MiB, num_objects: {num_objects}")
+
+    log(f"    Total number of objects stored: {len(archive_info['assets'])}, total archives in backup: {len(archive_info['archives'])}, total size: {int(total_backup_size / 1024 / 1024)} MiB")
 
     return archive_info
 
@@ -314,7 +328,17 @@ def load_agent_state_from_bucket(bucket_name):
     return agent_state
 
 
-def main(aws_bucket_name, source_dir):
+def upload_stage_only_assets(stage_only_assets, aws_bucket_name):
+    log("Checking stage-only artifacts for changes")
+    for asset in stage_only_assets:
+        asset_path = asset[0]
+        stage_key = asset[1]
+
+        if within_timelimit():
+            upload_file_aws_object(asset_path, aws_bucket_name, stage_key)
+
+
+def main(aws_bucket_name, backup_dir):
 
     bucket_objects = list_bucket(aws_bucket_name)
     bucket_object_keys = [obj.key for obj in bucket_objects]
@@ -346,22 +370,51 @@ def main(aws_bucket_name, source_dir):
                 # Setting this status will prevent further processing as its already uploaded
                 archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN
 
-    log(f"Walking the source directory: {source_dir}, and updating asset catalogue")
+    log(f"Walking the source directory: {backup_dir}, and updating asset catalogue")
     old_archive_info_hash = archive_info["hash"]
-    for folder in immich_working_dirs:
-        for root, dir, files in os.walk(f"{source_dir}/{folder}"):
-            for file_name in fnmatch.filter(files, "*"):
-                asset_path = f"{root}/{file_name}"
-                object_key = asset_path.removeprefix(f"{source_dir}/").replace("\\", "/")
-                disk_objects[object_key] = asset_path
-                add_asset_to_archive_info(archive_info, asset_path, object_key)
+    num_files_discovered = 0
+    for folder in map(lambda x: f"{backup_dir}/{x}", immich_working_dirs + custom_working_dirs):
+        if os.path.exists(folder):
+            for root, dir, files in os.walk(folder):
+                for file_name in fnmatch.filter(files, "*"):
+                    num_files_discovered += 1
+                    asset_path = f"{root}/{file_name}"
+                    object_key = asset_path.removeprefix(f"{backup_dir}/").replace("\\", "/")
+                    disk_objects[object_key] = asset_path
+                    add_asset_to_archive_info(archive_info, asset_path, object_key)
+
+    log(f"    Found {num_files_discovered} files in the standard archive working dirs")
+
+    # Walk the stage-only directory for files that bypass the archive system
+    stage_only_assets_to_upload = []
+    stage_only_assets_num = 0
+    stage_only_assets_size = 0
+    for folder in map(lambda x: f"{backup_dir}/{x}", stage_only_working_dirs):
+        if os.path.exists(folder):
+            for root, dir, files in os.walk(folder):
+                for file_name in fnmatch.filter(files, "*"):
+                    asset_path = f"{root}/{file_name}"
+                    object_key = asset_path.removeprefix(f"{backup_dir}/").replace("\\", "/")
+                    disk_objects[object_key] = asset_path
+                    stage_key = f"stage/{object_key}"
+
+                    stage_only_assets_size += os.path.getsize(asset_path)
+                    stage_only_assets_num += 1
+
+                    if stage_key not in bucket_object_keys:
+                        stage_only_assets_to_upload.append((asset_path, stage_key))
+    log(f"    Found {stage_only_assets_num} files in the stage-only working dirs, of size: {int(stage_only_assets_size / 1024 / 1024)} MiB")
 
     # Update the hash for the archive
     archive_info["hash"] = get_hash_for_archive_info(archive_info)
     if old_archive_info_hash == archive_info["hash"] and not agent_state == AGENT_STATE_PROCESSING:
+        # Ensure that the stage-only assets are uploaded even if the rest of the archive is good
+        upload_stage_only_assets(stage_only_assets_to_upload, aws_bucket_name)
         log("Archive has not changed so performing no operations")
         log("Finished")
         return
+
+    upload_stage_only_assets(stage_only_assets_to_upload, aws_bucket_name)
 
     # Save the archive_info to the bucket before we do any operations on it in-case of failure
     save_archive_info_to_bucket(aws_bucket_name, archive_info)
@@ -482,7 +535,7 @@ def main(aws_bucket_name, source_dir):
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        log("Expected usage: python3.exe aws-backup.py <aws_bucket_name> <source_dir>")
+        log("Expected usage: python3.exe aws-backup.py <aws-bucket-name> <backup-dir>")
         exit()
 
     if not os.path.isdir(f"{Path.home()}/.aws"):
@@ -490,11 +543,11 @@ if __name__ == "__main__":
         exit()
 
     aws_bucket_name = sys.argv[1]
-    source_dir = sys.argv[2]
+    backup_dir = sys.argv[2]
 
     for immich_working_dir in immich_working_dirs:
-        if not os.path.exists(f"{source_dir}/{immich_working_dir}"):
-            log(f"Working directory does not have the required folder structure: {immich_working_dirs}")
+        if not os.path.exists(f"{backup_dir}/{immich_working_dir}"):
+            log(f"Backup directory does not have the required immich folder structure: {immich_working_dirs}")
             exit()
 
-    main(aws_bucket_name, source_dir)
+    main(aws_bucket_name, backup_dir)

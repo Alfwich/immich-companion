@@ -2,7 +2,8 @@ import subprocess
 import sys
 import json
 
-server_url = "http://awut.asuscomm.com:2283"
+# This should be run on the server machine
+server_url = "http://localhost:2283"
 
 
 def main(args):
