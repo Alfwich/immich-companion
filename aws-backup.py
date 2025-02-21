@@ -29,8 +29,6 @@ archive_age_and_size_threshold = 1024 * 1024 * 512  # 512 MiB
 # picked back up on the next run of the backup tool
 max_processing_time = 60 * 60 * 22  # 22 Hours
 
-log_enabled = True
-
 # If enabled, files will be uploaded to the cloud
 upload_enabled = False
 
@@ -61,6 +59,20 @@ log_file = open(f"{os.path.dirname(os.path.realpath(__file__))}/{log_file_name}"
 
 start_timestamp = datetime.now(dt.UTC).timestamp()
 
+log_indent_level = 0
+log_enabled = True
+
+
+def push_log_indent():
+    global log_indent_level
+    log_indent_level += 1
+
+
+def pop_log_indent():
+    global log_indent_level
+    if log_indent_level > 0:
+        log_indent_level -= 1
+
 
 def enable_log():
     global log_enabled
@@ -76,10 +88,10 @@ def within_timelimit():
     return datetime.now(dt.UTC).timestamp() - start_timestamp <= max_processing_time
 
 
-def log(msg):
+def log(msg, added_indent=0):
     global log_enabled
     if log_enabled:
-        log_msg = f"[{datetime.now().isoformat()}] {msg}"
+        log_msg = f"[{datetime.now().isoformat()}] {'  ' * (log_indent_level + added_indent)}{msg}"
         print(log_msg)
         if not log_file.closed:
             log_file.write(f"{log_msg}\n")
@@ -87,19 +99,21 @@ def log(msg):
 
 def log_execution_parameters():
     log(f"Execution parameters")
-    log(f"    archive_version: {archive_version}")
-    log(f"    archive_size_threshold: {int(archive_size_threshold / 1024 / 1024)} MiB")
-    log(f"    archive_age_threshold: {int(archive_age_threshold / 86400)} Days")
-    log(f"    archive_age_and_size_threshold: {int(archive_age_and_size_threshold / 1024 / 1024)} MiB")
-    log(f"    max_processing_time: {int(max_processing_time / 60 / 60)} Hours")
-    log(f"    upload_enabled: {upload_enabled}")
-    log(f"    purge_enabled: {purge_enabled}")
-    log(f"    purge_archive_info: {purge_archive_info}")
-    log(f"    immich_working_dirs: {immich_working_dirs}")
-    log(f"    stage_only_working_dirs: {stage_only_working_dirs}")
-    log(f"    custom_working_dirs: {custom_working_dirs}")
-    log(f"    agent_state_file_name: {agent_state_file_name}")
-    log(f"    archive_state_file_name: {archive_state_file_name}")
+    push_log_indent()
+    log(f"archive_version: {archive_version}")
+    log(f"archive_size_threshold: {int(archive_size_threshold / 1024 / 1024)} MiB")
+    log(f"archive_age_threshold: {int(archive_age_threshold / 86400)} Days")
+    log(f"archive_age_and_size_threshold: {int(archive_age_and_size_threshold / 1024 / 1024)} MiB")
+    log(f"max_processing_time: {int(max_processing_time / 60 / 60)} Hours")
+    log(f"upload_enabled: {upload_enabled}")
+    log(f"purge_enabled: {purge_enabled}")
+    log(f"purge_archive_info: {purge_archive_info}")
+    log(f"immich_working_dirs: {immich_working_dirs}")
+    log(f"stage_only_working_dirs: {stage_only_working_dirs}")
+    log(f"custom_working_dirs: {custom_working_dirs}")
+    log(f"agent_state_file_name: {agent_state_file_name}")
+    log(f"archive_state_file_name: {archive_state_file_name}")
+    pop_log_indent()
 
 
 def list_bucket(bucket_name):
@@ -109,7 +123,7 @@ def list_bucket(bucket_name):
 
 
 def upload_file_aws_object(file_name, bucket_name, location):
-    log(f"    Upload file_name: {file_name}, to bucket_name: {bucket_name}, to location: {location}")
+    log(f"Upload file_name: {file_name}, to bucket_name: {bucket_name}, to location: {location}")
     if upload_enabled:
         s3_resource = boto3.resource("s3")
         s3_resource.Object(bucket_name, location).put(Body=open(file_name, 'rb'), StorageClass="STANDARD")
@@ -192,7 +206,7 @@ def add_asset_to_archive_info(archive_info, asset_path, object_key):
 
     # If the asset is not in the archive_info, then its new and we should add it to the first unlocked archive
     if not asset_in_archive_info:
-        log(f"    Adding asset {asset_path} to archive")
+        log(f"Adding asset {asset_path} to archive")
         new_asset = new_asset_info(disk_asset_size, str(archive["archive_id"]))
         archive_info["assets"][object_key] = new_asset
         archive["size"] += disk_asset_size
@@ -233,7 +247,7 @@ def add_asset_to_archive_info(archive_info, asset_path, object_key):
     # - Archive size is above the max archive size, we immediatly move this into long-term storage
     # - Archive is old enough, and within a reasonable size, that we should move it into long-term storage
     if archive_is_unlocked and (is_above_size_threshold or is_old_and_above_size_threshold):
-        log(f"    Locking archive id: {archive['archive_id']}, size: {int(archive['size'] / 1024 / 1024)} MiB, as its over {int(archive_size_threshold / 1024 / 1024)} MiB")
+        log(f"Locking archive id: {archive['archive_id']}, size: {int(archive['size'] / 1024 / 1024)} MiB, as its over {int(archive_size_threshold / 1024 / 1024)} MiB")
         archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE
 
 
@@ -262,6 +276,7 @@ def count_number_of_assets_in_archive(archive_info, archive_id):
 def load_archive_info_from_bucket(bucket_name):
 
     log(f"Loading archive info from bucket: {bucket_name}")
+    push_log_indent()
 
     archive_info = new_archive_info()
     s3_client = boto3.client("s3")
@@ -279,16 +294,18 @@ def load_archive_info_from_bucket(bucket_name):
         total_backup_size += archive["size"]
         if archive["status"] == ARCHIVE_ASSET_STATUS_UNLOCKED:
             num_objects = count_number_of_assets_in_archive(archive_info, archive["archive_id"])
-            log(f"    Current open archive id: {archive['archive_id']}, unlock_date: {archive['unlock_date']}, size: {int(archive['size']/1024/1024)} MiB, num_objects: {num_objects}")
+            log(f"Current open archive id: {archive['archive_id']}, unlock_date: {archive['unlock_date']}, size: {int(archive['size']/1024/1024)} MiB, num_objects: {num_objects}")
 
             unlock_date = int(archive['unlock_date'])
             if unlock_date > 0:
                 archive_unlock_age = int(datetime.now(dt.UTC).timestamp()) - unlock_date
                 time_until_unlock = archive_age_threshold - archive_unlock_age
                 time_until_unlock_message = "NOW" if time_until_unlock <= 0 else f"{(time_until_unlock / 60 / 60):.2f} hr"
-                log(f"        Time until archive lock and archive: {time_until_unlock_message}")
+                log(f"Time until archive lock and archive: {time_until_unlock_message}", 1)
 
-    log(f"    Total number of objects stored: {len(archive_info['assets'])}, total archives in backup: {len(archive_info['archives'])}, total size: {int(total_backup_size / 1024 / 1024)} MiB")
+    log(f"Total number of objects stored: {len(archive_info['assets'])}, total archives in backup: {len(archive_info['archives'])}, total size: {int(total_backup_size / 1024 / 1024)} MiB")
+
+    pop_log_indent()
 
     return archive_info
 
@@ -337,12 +354,15 @@ def load_agent_state_from_bucket(bucket_name):
 
 def upload_stage_only_assets(stage_only_assets, aws_bucket_name):
     log("Checking stage-only artifacts for changes")
+
+    push_log_indent()
     for asset in stage_only_assets:
         asset_path = asset[0]
         stage_key = asset[1]
 
         if within_timelimit():
             upload_file_aws_object(asset_path, aws_bucket_name, stage_key)
+    pop_log_indent()
 
 
 def update_archive_size_for_assets(archive_info):
@@ -375,25 +395,30 @@ def main(aws_bucket_name, backup_dir):
     # If the agent was never completed we should ensure archive consistency, as possible
     if agent_state != AGENT_STATE_COMPLETE:
         log(f"Agent state was processing, or unknown, checking archives for consistency...")
+        push_log_indent()
+
         for archive in archive_info["archives"]:
             archive_key = f"archive/archive-{archive['archive_id']}.zip"
             archive_exists = archive_key in bucket_object_keys
 
-            log(f"    Checking archive {archive['archive_id']} -> status: {archive['status']}")
-            log(f"        Archive exists: {archive_exists}")
+            log(f"Checking archive {archive['archive_id']} -> status: {archive['status']}")
+            log(f"Archive exists: {archive_exists}", 1)
 
             # The archive was supposed to be uploaded, but it does not exist
             if archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN and not archive_exists:
-                log(f"    Archive does not exist on remote storage, marking as pending upload")
+                log(f"Archive does not exist on remote storage, marking as pending upload")
                 archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE
 
             # The archive was supposed to be uploaded and it does exist
             elif archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE and archive_exists:
-                log(f"    Archive exists on remote storage, marking as uploaded")
+                log(f"Archive exists on remote storage, marking as uploaded")
                 # Setting this status will prevent further processing as its already uploaded
                 archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN
 
+        pop_log_indent()
+
     log(f"Walking the source directory: {backup_dir}, and updating asset catalogue")
+    push_log_indent()
     old_archive_info_hash = archive_info["hash"]
     num_files_discovered = 0
     for folder in map(lambda x: f"{backup_dir}/{x}", immich_working_dirs + custom_working_dirs):
@@ -406,7 +431,7 @@ def main(aws_bucket_name, backup_dir):
                     disk_objects[object_key] = asset_path
                     add_asset_to_archive_info(archive_info, asset_path, object_key)
 
-    log(f"    Found {num_files_discovered} files in the standard archive working dirs")
+    log(f"Found {num_files_discovered} files in the standard archive working dirs")
 
     # Walk the stage-only directory for files that bypass the archive system
     stage_only_assets_to_upload = []
@@ -426,7 +451,9 @@ def main(aws_bucket_name, backup_dir):
 
                     if stage_key not in bucket_object_keys:
                         stage_only_assets_to_upload.append((asset_path, stage_key))
-    log(f"    Found {stage_only_assets_num} files in the stage-only working dirs, of size: {int(stage_only_assets_size / 1024 / 1024)} MiB")
+    log(f"Found {stage_only_assets_num} files in the stage-only working dirs, of size: {int(stage_only_assets_size / 1024 / 1024)} MiB")
+
+    pop_log_indent()
 
     # Update the hash for the archive
     archive_info["hash"] = get_hash_for_archive_info(archive_info)
@@ -444,6 +471,7 @@ def main(aws_bucket_name, backup_dir):
     save_agent_state_to_bucket(aws_bucket_name, AGENT_STATE_PROCESSING)
 
     log("Checking staged assets for upload")
+    push_log_indent()
     for asset in archive_info["assets"]:
         should_upload = False
         asset_data = archive_info["assets"][asset]
@@ -459,8 +487,10 @@ def main(aws_bucket_name, backup_dir):
         if should_upload and asset in disk_objects and within_timelimit():
             stage_key = f"stage/{asset}"
             upload_file_aws_object(disk_objects[asset], aws_bucket_name, stage_key)
+    pop_log_indent()
 
     log("Pruning assets which have been deleted from the archive")
+    push_log_indent()
     archive_info_keys = set(archive_info["assets"].keys())
     for key in archive_info_keys:
 
@@ -471,13 +501,15 @@ def main(aws_bucket_name, backup_dir):
                 in_frozen_archive = True
 
         if not in_frozen_archive and key not in disk_objects:
-            log(f"    Deleting asset: {key}")
+            log(f"Deleting asset: {key}")
             for archive_id in archive_info["assets"][key]["archives"]:
                 archive = archive_info["archives"][int(archive_id)]
                 archive["size"] -= archive_info["assets"][key]["archives"][archive_id]["size"]
             del archive_info["assets"][key]
+    pop_log_indent()
 
     log("Checking archives to see if we need to upload any")
+    push_log_indent()
     for archive in archive_info["archives"]:
         archive_id = str(archive["archive_id"])
 
@@ -485,31 +517,35 @@ def main(aws_bucket_name, backup_dir):
         if archive["status"] == ARCHIVE_ASSET_STATUS_LOCKED_PENDING_FREEZE and within_timelimit():
             log(f"Uploading archive {archive['archive_id']}")
 
+            push_log_indent()
             with tempfile.TemporaryDirectory() as tmpdirname:
                 archive_zip = zipfile.ZipFile(f"{tmpdirname}/archive.zip", "w")
                 for object_key in archive_info["assets"]:
                     if archive_id in archive_info["assets"][object_key]["archives"]:
                         if object_key in disk_objects:
-                            log(f"    Writing {object_key} to archive")
+                            log(f"Writing {object_key} to archive")
                             asset_path = disk_objects[object_key]
                             if upload_enabled:
                                 archive_zip.write(asset_path, object_key)
                         else:
-                            log(f"    Skipping {object_key} in archive as it does not exist on the filesystem")
+                            log(f"Skipping {object_key} in archive as it does not exist on the filesystem")
 
                 archive_zip.close()
 
                 upload_file_aws_object(f"{tmpdirname}/archive.zip", aws_bucket_name, f"archive/archive-{archive['archive_id']}.zip")
+            pop_log_indent()
 
             archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN
+    pop_log_indent()
 
     log("Deleting staged files that are not on the filesystem")
+    push_log_indent()
     for obj in bucket_objects:
         if obj.key.startswith("stage/"):
             object_key = obj.key.removeprefix("stage/")
             # If this staged object is not on disk, we should delete it
             if object_key not in disk_objects:
-                log(f"    Deleting staged object {obj.key}")
+                log(f"Deleting staged object {obj.key}")
                 obj.delete()
 
                 # If the asset is in a frozen archive we should not delete its record
@@ -533,6 +569,7 @@ def main(aws_bucket_name, backup_dir):
                 if not in_unlocked_archive:
                     log(f"Deleting staged object {obj.key}")
                     obj.delete()
+    pop_log_indent()
 
     # True up the archive sizes for deleted keys
     update_archive_size_for_assets(archive_info)
