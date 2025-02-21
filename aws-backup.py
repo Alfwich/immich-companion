@@ -30,14 +30,14 @@ archive_age_and_size_threshold = 1024 * 1024 * 512  # 512 MiB
 max_processing_time = 60 * 60 * 22  # 22 Hours
 
 # If enabled, files will be uploaded to the cloud
-upload_enabled = False
+upload_enabled = True
+
+# If we should allow storing files into deep storage
+deep_storage_enabled = False
 
 # TODO(aw): This should provide a way to prune archives that have a lot of deleted assets
 #           Currently archives that have been frozen are considered immutable
 purge_enabled = False
-
-# DANGER: This will delete the archive info file and destroy all information about the archive
-purge_archive_info = False
 
 # We should find all these directories when doing the backup upload
 # All other folders are generated and should be regenerated on a rebuild
@@ -91,7 +91,7 @@ def within_timelimit():
 def log(msg, added_indent=0):
     global log_enabled
     if log_enabled:
-        log_msg = f"[{datetime.now().isoformat()}] {'  ' * (log_indent_level + added_indent)}{msg}"
+        log_msg = f"[{datetime.now().isoformat()}]{'  ' * (log_indent_level + added_indent + 1)}{msg}"
         print(log_msg)
         if not log_file.closed:
             log_file.write(f"{log_msg}\n")
@@ -106,8 +106,8 @@ def log_execution_parameters():
     log(f"archive_age_and_size_threshold: {int(archive_age_and_size_threshold / 1024 / 1024)} MiB")
     log(f"max_processing_time: {int(max_processing_time / 60 / 60)} Hours")
     log(f"upload_enabled: {upload_enabled}")
+    log(f"deep_storage_enabled: {deep_storage_enabled}")
     log(f"purge_enabled: {purge_enabled}")
-    log(f"purge_archive_info: {purge_archive_info}")
     log(f"immich_working_dirs: {immich_working_dirs}")
     log(f"stage_only_working_dirs: {stage_only_working_dirs}")
     log(f"custom_working_dirs: {custom_working_dirs}")
@@ -122,13 +122,23 @@ def list_bucket(bucket_name):
     return list(bucket.objects.all())
 
 
-def upload_file_aws_object(file_name, bucket_name, location):
+def upload_file_aws_object(file_name, bucket_name, location, storage_class="STANDARD"):
     log(f"Upload file_name: {file_name}, to bucket_name: {bucket_name}, to location: {location}")
     if upload_enabled:
         s3_resource = boto3.resource("s3")
-        s3_resource.Object(bucket_name, location).put(Body=open(file_name, 'rb'), StorageClass="STANDARD")
-        # Ensure this works before taking the saftey off
-        # s3_resource.Object(bucket_name, location).put(Body=open(file_name, 'rb'), StorageClass="DEEP_ARCHIVE")
+        s3_resource.Object(bucket_name, location).put(Body=open(file_name, 'rb'), StorageClass=storage_class)
+
+
+def upload_file_aws_object_standard(file_name, bucket_name, location):
+    upload_file_aws_object(file_name, bucket_name, location)
+
+
+def upload_file_aws_object_deep_archive(file_name, bucket_name, location):
+    # If deep storage is disabled use standard storage instead of deep storage
+    if deep_storage_enabled:
+        upload_file_aws_object(file_name, bucket_name, location, "DEEP_ARCHIVE")
+    else:
+        upload_file_aws_object_standard(file_name, bucket_name, location)
 
 
 def hash_string_list(l):
@@ -281,13 +291,12 @@ def load_archive_info_from_bucket(bucket_name):
     archive_info = new_archive_info()
     s3_client = boto3.client("s3")
 
-    if not purge_archive_info:
-        try:
-            response = s3_client.get_object(Bucket=bucket_name, Key=archive_state_file_name)
-            archive_info = json.loads(response["Body"].read())
-        except botocore.exceptions.ClientError as e:
-            # If the file does not exist, we will create a new one
-            pass
+    try:
+        response = s3_client.get_object(Bucket=bucket_name, Key=archive_state_file_name)
+        archive_info = json.loads(response["Body"].read())
+    except botocore.exceptions.ClientError as e:
+        log("Failed to pull down archive state information from cloud storage. Aborting.")
+        exit()
 
     total_backup_size = 0
     for archive in archive_info["archives"]:
@@ -361,7 +370,7 @@ def upload_stage_only_assets(stage_only_assets, aws_bucket_name):
         stage_key = asset[1]
 
         if within_timelimit():
-            upload_file_aws_object(asset_path, aws_bucket_name, stage_key)
+            upload_file_aws_object_standard(asset_path, aws_bucket_name, stage_key)
     pop_log_indent()
 
 
@@ -464,11 +473,11 @@ def main(aws_bucket_name, backup_dir):
         log("Finished")
         return
 
-    upload_stage_only_assets(stage_only_assets_to_upload, aws_bucket_name)
-
     # Save the archive_info to the bucket before we do any operations on it in-case of failure
     save_archive_info_to_bucket(aws_bucket_name, archive_info)
     save_agent_state_to_bucket(aws_bucket_name, AGENT_STATE_PROCESSING)
+
+    upload_stage_only_assets(stage_only_assets_to_upload, aws_bucket_name)
 
     log("Checking staged assets for upload")
     push_log_indent()
@@ -486,7 +495,7 @@ def main(aws_bucket_name, backup_dir):
         # Directly upload fresh assets as they are either new or updated and we have time
         if should_upload and asset in disk_objects and within_timelimit():
             stage_key = f"stage/{asset}"
-            upload_file_aws_object(disk_objects[asset], aws_bucket_name, stage_key)
+            upload_file_aws_object_standard(disk_objects[asset], aws_bucket_name, stage_key)
     pop_log_indent()
 
     log("Pruning assets which have been deleted from the archive")
@@ -519,20 +528,23 @@ def main(aws_bucket_name, backup_dir):
 
             push_log_indent()
             with tempfile.TemporaryDirectory() as tmpdirname:
-                archive_zip = zipfile.ZipFile(f"{tmpdirname}/archive.zip", "w")
-                for object_key in archive_info["assets"]:
-                    if archive_id in archive_info["assets"][object_key]["archives"]:
-                        if object_key in disk_objects:
-                            log(f"Writing {object_key} to archive")
-                            asset_path = disk_objects[object_key]
-                            if upload_enabled:
-                                archive_zip.write(asset_path, object_key)
-                        else:
-                            log(f"Skipping {object_key} in archive as it does not exist on the filesystem")
+                try:
+                    archive_zip = zipfile.ZipFile(f"{tmpdirname}/archive.zip", "w")
+                    for object_key in archive_info["assets"]:
+                        if archive_id in archive_info["assets"][object_key]["archives"]:
+                            if object_key in disk_objects:
+                                log(f"Writing {object_key} to archive")
+                                asset_path = disk_objects[object_key]
+                                if upload_enabled:
+                                    archive_zip.write(asset_path, object_key)
+                            else:
+                                log(f"Skipping {object_key} in archive as it does not exist on the filesystem")
 
-                archive_zip.close()
+                    archive_zip.close()
 
-                upload_file_aws_object(f"{tmpdirname}/archive.zip", aws_bucket_name, f"archive/archive-{archive['archive_id']}.zip")
+                    upload_file_aws_object_deep_archive(f"{tmpdirname}/archive.zip", aws_bucket_name, f"archive/archive-{archive['archive_id']}.zip")
+                except:
+                    archive_zip.close()
             pop_log_indent()
 
             archive["status"] = ARCHIVE_ASSET_STATUS_LOCKED_UPLOADED_FROZEN
