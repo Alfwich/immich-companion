@@ -125,8 +125,13 @@ def list_bucket(bucket_name):
 def upload_file_aws_object(file_name, bucket_name, location, storage_class="STANDARD"):
     log(f"Upload file_name: {file_name}, to bucket_name: {bucket_name}, to location: {location}")
     if upload_enabled:
-        s3_resource = boto3.resource("s3")
-        s3_resource.Object(bucket_name, location).put(Body=open(file_name, 'rb'), StorageClass=storage_class)
+        try:
+            s3_resource = boto3.resource("s3")
+            s3_resource.Object(bucket_name, location).put(Body=open(file_name, 'rb'), StorageClass=storage_class)
+        except botocore.exceptions.ClientError as e:
+            log(f"AWS exception: {e}")
+            log("Failed to upload file. Aborting.")
+            exit()
 
 
 def upload_file_aws_object_standard(file_name, bucket_name, location):
@@ -295,6 +300,7 @@ def load_archive_info_from_bucket(bucket_name):
         response = s3_client.get_object(Bucket=bucket_name, Key=archive_state_file_name)
         archive_info = json.loads(response["Body"].read())
     except botocore.exceptions.ClientError as e:
+        log(f"AWS exception: {e}")
         log("Failed to pull down archive state information from cloud storage. Aborting.")
         exit()
 
@@ -529,7 +535,7 @@ def main(aws_bucket_name, backup_dir):
             push_log_indent()
             with tempfile.TemporaryDirectory() as tmpdirname:
                 try:
-                    archive_zip = zipfile.ZipFile(f"{tmpdirname}/archive.zip", "w")
+                    archive_zip = zipfile.ZipFile(f"{tmpdirname}/archive.zip", "w", strict_timestamps=False)
                     for object_key in archive_info["assets"]:
                         if archive_id in archive_info["assets"][object_key]["archives"]:
                             if object_key in disk_objects:
@@ -543,7 +549,8 @@ def main(aws_bucket_name, backup_dir):
                     archive_zip.close()
 
                     upload_file_aws_object_deep_archive(f"{tmpdirname}/archive.zip", aws_bucket_name, f"archive/archive-{archive['archive_id']}.zip")
-                except:
+
+                finally:
                     archive_zip.close()
             pop_log_indent()
 
