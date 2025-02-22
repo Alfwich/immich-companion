@@ -56,6 +56,7 @@ archive_state_file_name = "archive.json"
 
 log_file_name = f"backup-log.{datetime.now().timestamp()}.txt"
 log_file = open(f"{os.path.dirname(os.path.realpath(__file__))}/{log_file_name}", "w+")
+sys.stderr = log_file
 
 start_timestamp = datetime.now(dt.UTC).timestamp()
 
@@ -623,4 +624,8 @@ if __name__ == "__main__":
             log(f"Backup directory does not have the required immich folder structure: {immich_working_dirs}")
             exit()
 
-    main(aws_bucket_name, backup_dir)
+    try:
+        main(aws_bucket_name, backup_dir)
+    except Exception as e:
+        log(f"Unhandled exception caught: {e}")
+        raise
