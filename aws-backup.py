@@ -315,10 +315,10 @@ def load_archive_info_from_bucket(bucket_name):
 
             unlock_date = int(archive['unlock_date'])
             if unlock_date > 0:
-                archive_unlock_age = int(datetime.now(dt.UTC).timestamp()) - unlock_date
-                time_until_unlock = archive_age_threshold - archive_unlock_age
+                archive_unlock_duration = int(datetime.now(dt.UTC).timestamp()) - unlock_date
+                time_until_unlock = archive_age_threshold - archive_unlock_duration
                 time_until_unlock_message = "NOW" if time_until_unlock <= 0 else f"{(time_until_unlock / 60 / 60):.2f} hr"
-                log(f"Time until archive lock and archive: {time_until_unlock_message}", 1)
+                log(f"Time until lock: {time_until_unlock_message} if over {int(archive_age_and_size_threshold/1024/1024)} MiB", 1)
 
     log(f"Total number of objects stored: {len(archive_info['assets'])}, total archives in backup: {len(archive_info['archives'])}, total size: {int(total_backup_size / 1024 / 1024)} MiB")
 
