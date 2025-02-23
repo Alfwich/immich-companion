@@ -7,6 +7,7 @@ import zipfile
 import botocore
 import json
 import hashlib
+import time
 from pathlib import Path
 
 from datetime import datetime
@@ -437,6 +438,7 @@ def main(aws_bucket_name, backup_dir):
     push_log_indent()
     old_archive_info_hash = archive_info["hash"]
     num_files_discovered = 0
+    walk_timestamp = time.time()
     for folder in map(lambda x: f"{backup_dir}/{x}", immich_working_dirs + custom_working_dirs):
         if os.path.exists(folder):
             for root, dir, files in os.walk(folder):
@@ -447,7 +449,12 @@ def main(aws_bucket_name, backup_dir):
                     disk_objects[object_key] = asset_path
                     add_asset_to_archive_info(archive_info, asset_path, object_key)
 
-    log(f"Found {num_files_discovered} files in the standard archive working dirs")
+                    new_timestamp = time.time()
+                    if (new_timestamp - walk_timestamp > 5):
+                        log(f"Still scanning while finding {num_files_discovered} files ...", 1)
+                        walk_timestamp = new_timestamp
+
+    log(f"Finished with {num_files_discovered} files in the standard archive working dirs")
 
     # Walk the stage-only directory for files that bypass the archive system
     stage_only_assets_to_upload = []
