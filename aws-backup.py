@@ -177,7 +177,7 @@ def new_archive_info():
         "hash": "",
         "archives": [],
         "assets": {},
-        "last_updated": datetime.now().isoformat(),
+        "last_updated": "",
     }
 
 
@@ -305,6 +305,8 @@ def load_archive_info_from_bucket(bucket_name):
         log(f"AWS exception: {e}")
         log("Failed to pull down archive state information from cloud storage. Aborting.")
         exit()
+
+    archive_info["last_updated"] = datetime.now().isoformat()
 
     total_backup_size = 0
     for archive in archive_info["archives"]:
