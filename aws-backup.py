@@ -21,9 +21,9 @@ archive_version = 0.1
 archive_size_threshold = 1024 * 1024 * 1024 * 1  # 1 GiB
 
 # Unlocked archives will be locked and uploaded to deep storage if:
-# - The archive size is greater than 512 MiB and has been staged for at least 7 days
+# - The archive size is greater than 128 MiB and has been stale for at least 7 days
 archive_age_threshold = 86400 * 7  # 7 days
-archive_age_and_size_threshold = 1024 * 1024 * 512  # 512 MiB
+archive_age_and_size_threshold = 1024 * 1024 * 128  # 128 MiB
 
 # Max amount of time in seconds that the processing can run.
 # Any uploads for archives or stages assets will be
@@ -248,10 +248,13 @@ def add_asset_to_archive_info(archive_info, asset_path, object_key):
             archive_to_update["size"] += disk_asset_size
             asset_inserted = True
 
-    # If the asset was inserted and the archive is empty, we should unlock it
-    if asset_inserted and archive["status"] == ARCHIVE_ASSET_STATUS_EMPTY:
-        archive["status"] = ARCHIVE_ASSET_STATUS_UNLOCKED
+    # Update the unlock date if we insert a new item into the archive to reset the upload timer
+    if asset_inserted:
         archive["unlock_date"] = int(datetime.now(dt.UTC).timestamp())
+
+        # Transition the archive if needed
+        if archive["status"] == ARCHIVE_ASSET_STATUS_EMPTY:
+            archive["status"] = ARCHIVE_ASSET_STATUS_UNLOCKED
 
     # Progress the archive status, if needed
     archive_size = archive["size"]
